@@ -1,9 +1,12 @@
 import urllib
 
 import chardet
+import psycopg2
 import requests
 from bs4 import BeautifulSoup
 from bs4.element import Tag
+
+import settings
 
 URL = 'https://race.netkeiba.com/race/result.html?race_id=202106050811&rf=race_list'
 
@@ -25,19 +28,22 @@ class ResultRecord(object):
         print(self.__dict__)
 
 
+def insert_data_into_db(db_name: str, user_name: str):
+    conn = psycopg2.connect(f'dbname={db_name} user={user_name}')
+    cursor = conn.cursor()
+    # cur.execute("CREATE TABLE test (id serial PRIMARY KEY, num integer, data varchar);")
+    cursor.execute('begin transaction;')
+    cursor.execute("insert into race_result values (3, 'htest2');")
+    cursor.execute("select * from race_result;")
+    print(cursor.fetchall())
+    cursor.execute('commit;')
+    cursor.close()
+
+
 def main():
-    response = requests.get(URL)
-
-    soup = BeautifulSoup(response.content, 'html.parser')
-    header = soup.select_one('.Header')
-    header_text = header.get_text(strip=True)
-    print(header_text)
-
-    horse_info_list = [horse_info for horse_info in soup.select('.HorseList')]
-    print(f'Number of horses: {len(horse_info_list)}')
-    for horse_index, horse_info in enumerate(horse_info_list):
-        print(horse_index)
-        result_record = ResultRecord(horse_info)
+    insert_data_into_db(
+        db_name=settings.DB_NAME, user_name=settings.USER_NAME
+    )
 
 
 if __name__ == '__main__':
