@@ -130,3 +130,9 @@ dmypy.json
 
 # postgrels
 postgres/
+
+# macOS
+.DS_Store
+
+# data
+*.html
