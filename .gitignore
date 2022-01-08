@@ -127,3 +127,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# postgrels
+postgres/
+
+# macOS
+.DS_Store
+
+# data
+*.html

@@ -1,0 +1,9 @@
+{
+    "recommendations": [
+        "tabnine.tabnine-vscode",
+        "usernamehw.errorlens",
+        "njpwerner.autodocstring",
+        "ms-python.python",
+        "mhutchie.git-graph"
+    ]
+}
