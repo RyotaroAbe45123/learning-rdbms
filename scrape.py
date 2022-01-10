@@ -1,80 +1,127 @@
-import csv
-import json
-from typing import List
+import os
+from typing import Generator
+from urllib.parse import urljoin
 
-import lxml.html
+import psycopg2
 import requests
 from bs4 import BeautifulSoup
 
-URL = 'https://race.netkeiba.com/race/result.html?race_id=202106050811&rf=race_list'
-
-# response = requests.get(URL)
-# response.encoding = 'EUC-JP'
-# print(response.text)
+import settings
 
 
-# tree = lxml.html.parse('./text.html')
-# html = tree.getroot()
-# html = lxml.html.fromstring(response.text)
+class RaceResult(object):
+    def __init__(self, race_url: str) -> None:
+        response = requests.get(race_url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        self.horse_info_list = soup.find('table').find_all('tr')[1:]
+        self.race_id = int(race_url.split('/')[-2])
 
-# h1 = html.cssselect('h1')[0]
-# print(h1.tag)
-# print(h1.attrib)
-# print(h1.get('title'))
-# print(h1.text_content())
+    def make_record_generator(self) -> Generator[dict, None, None]:
+        for horse_info in self.horse_info_list:
+            self.horse_id = int(horse_info.find(
+                'a').get('href').split('/')[-2])
+            td_list = horse_info.find_all('td')
+            self.rank = int(td_list[0].get_text(strip=True))
+            self.frame_order = int(td_list[1].get_text(strip=True))
+            self.horse_order = int(td_list[2].get_text(strip=True))
+            self.odds = float(td_list[12].get_text(strip=True))
+            yield dict(
+                race_id=self.race_id, horse_id=self.horse_id,
+                rank=self.rank,
+                frame_order=self.frame_order, horse_order=self.horse_order,
+                odds=self.odds
+            )
 
-def bs(url: str):
-    response = requests.get(url)
+
+def make_race_list_generator(date: str) -> Generator[str, None, None]:
+    race_list_url = urljoin(settings.RACE_DB_BASE_URL, f'race/list/{date}')
+    response = requests.get(race_list_url)
     soup = BeautifulSoup(response.content, 'html.parser')
-    horse_name_list = soup.find_all('span', class_='Horse_Name')
-    for horse_name in horse_name_list:
-        h = horse_name.select('span > a')[0]
-        print(h.get('title'), h.get('href'))
-        print(horse_name.select('[]'))
+    race_list = soup.select('#main > div > div > div > dl > dd > ul > li')
+    for race in race_list:
+        tmp_url = race.find('a').get('href')
+        url = urljoin(settings.RACE_DB_BASE_URL, tmp_url)
+        yield url
 
 
-def fetch_html_from_url(url: str) -> str:
-    response = requests.get(url)
-    response.encoding = 'EUC-JP'
-    return response.text
+class ScrapeDB(object):
+    def __init__(self, db_name: str, user_name: str,
+                 schema_name: str = None) -> None:
+        self.db_name = db_name
+        self.user_name = user_name
+        self.schema_name = schema_name
 
-
-def scrape(html: str, base_url: str) -> List[dict]:
-    books = []
-    html = lxml.html.fromstring(html)
-    html.make_links_absolute(base_url)
-
-    l = html.cssselect(
-        '#All_Result_Table > tbody > tr:nth-child(1)')
-    l = html.cssselect('a[href^="https://db.netkeiba.com/horse"]')
-    l = html.cssselect('.Horse_Name')
-    print(l)
-    print(type(l), len(l))
-    for a in l:
-        print(a.attrib)
-        url = a.cssselect('a[href^="https://"]')
-        url = a.get('href')
-        if url:
-            print(url)
+    def begin_connection(self) -> psycopg2.extensions.connection:
+        if self.schema_name is not None:
+            connect = psycopg2.connect(
+                dbname=self.db_name,
+                user=self.user_name,
+                options=f'-c search_path={self.schema_name}'
+            )
         else:
-            print(url, 'ahh')
+            connect = psycopg2.connect(
+                dbname=self.db_name,
+                user=self.user_name
+            )
+        return connect
 
-    # for a in html.cssselect(
-    #         '#All_Result_Table > tbody > tr:nth-child(1) > td:nth-child(4)'):
-    #     url = a.get('href')
-    # print(url)
-# All_Result_Table > tbody > tr:nth-child(1) > td:nth-child(4)
-# All_Result_Table > tbody > tr:nth-child(1) > td:nth-child(4) > span
+    def insert_data_into_table(self, table_name: str, values: tuple):
+        with self.begin_connection() as connect:
+            with connect.cursor() as cursor:
+                try:
+                    query = f"insert into {table_name} values {values};"
+                    cursor.execute(query)
+                    cursor.execute('commit;')
+                except psycopg2.errors.UniqueViolation as error:
+                    print(error)
+                except Exception as error:
+                    print(error)
+                    cursor.execute('rollback;')
+
+    # def insert_data_into_table(self, table_name: str, values: tuple):
+    #     self.begin_connect()
+    #     cursor = self.connect.cursor()
+    #     cursor.execute('begin transaction;')
+    #     query = f"insert into {table_name} values {values};"
+    #     try:
+    #         cursor.execute(query)
+    #     except BaseException as e:
+    #         print(e)
+    #         # cursor.execute('rollback;')
+    #     # cursor.execute('update race_results set odds=10 where race_id=1;')
+    #     # cursor.execute(f"select * from {table_name};")
+    #     # print(cursor.fetchall())
+    #     # cursor.execute('commit;')
+    #     cursor.close()
+    #     self.end_connect(self.connect)
 
 
-def save():
+class ScrapePipeline(object):
     pass
 
 
 def main():
-    bs(URL)
-    # html = fetch_html_from_url(url=URL)
-    # horses = scrape(html=html, base_url=URL)
+    target_date = '20211226'
+    race_list_generator = make_race_list_generator(date=target_date)
+    for race_index, race_url in enumerate(race_list_generator, start=1):
+        race_record = RaceResult(race_url=race_url)
+        race_record_generator = race_record.make_record_generator()
+        break
+    for record_dict in race_record_generator:
+        # print(f'dict: {record_dict}')
+        # dict -> tuple
+        record_tuple = tuple(record_dict.values())
+        # print(type(record_tuple))
+        print(f'tuple: {record_tuple}')
+        break
+    scrapedb = ScrapeDB(
+        db_name=settings.DB_NAME,
+        user_name=settings.USER_NAME,
+        schema_name=settings.SCHEMA_NAME)
+    scrapedb.insert_data_into_table(
+        table_name='race_results', values=record_tuple
+    )
+    return None
 
 
 if __name__ == '__main__':
