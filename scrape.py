@@ -1,127 +1,142 @@
 import os
-from typing import Generator
-from urllib.parse import urljoin
+import re
+import urllib
+from time import sleep
+from typing import List, Tuple
+from urllib.robotparser import RobotFileParser
 
-import psycopg2
 import requests
 from bs4 import BeautifulSoup
 
 import settings
+from table import Table
 
 
-class RaceResult(object):
-    def __init__(self, race_url: str) -> None:
-        response = requests.get(race_url)
+class HTMLCrawl(object):
+    def __init__(self, db_name: str, user_name: str, schema_name: str,
+                 table_name: str = settings.HTML_TABLE_NAME) -> None:
+        self.table = Table(
+            db_name=db_name, user_name=user_name, schema_name=schema_name, table_name=table_name
+        )
+
+    def _get_race_urls_list(self, race_date: str) -> List[str]:
+        race_list_url = urllib.parse.urljoin(
+            settings.RACE_DB_BASE_URL, f'race/list/{race_date}'
+        )
+        response = requests.get(race_list_url)
         soup = BeautifulSoup(response.content, 'html.parser')
-        self.horse_info_list = soup.find('table').find_all('tr')[1:]
-        self.race_id = int(race_url.split('/')[-2])
+        race_list = soup.select('#main > div > div > div > dl > dd > ul > li')
+        race_urls_list = []
+        for race in race_list:
+            relative_url = race.find('a').get('href')
+            absolute_url = urllib.parse.urljoin(
+                settings.RACE_DB_BASE_URL, relative_url)
+            race_urls_list.append(absolute_url)
+        return list(race_urls_list)
 
-    def make_record_generator(self) -> Generator[dict, None, None]:
-        for horse_info in self.horse_info_list:
-            self.horse_id = int(horse_info.find(
-                'a').get('href').split('/')[-2])
-            td_list = horse_info.find_all('td')
-            self.rank = int(td_list[0].get_text(strip=True))
-            self.frame_order = int(td_list[1].get_text(strip=True))
-            self.horse_order = int(td_list[2].get_text(strip=True))
-            self.odds = float(td_list[12].get_text(strip=True))
-            yield dict(
-                race_id=self.race_id, horse_id=self.horse_id,
-                rank=self.rank,
-                frame_order=self.frame_order, horse_order=self.horse_order,
-                odds=self.odds
+    def _make_values(self, race_id: str, html_path: str) -> Tuple[str, str]:
+        return str(race_id), str(html_path)
+
+    def run(self, race_date: str, delay_time_s: int = 2) -> None:
+        # race_dataからrace_urlのリストを取得
+        self.race_urls_list = self._get_race_urls_list(
+            race_date=race_date)
+        if not self.race_urls_list:
+            print(f'No race in {race_date}')
+        for race_url in self.race_urls_list:
+            # race_urlからrace_id, race_htmlを取得
+            race_id = str(race_url.split('/')[-2])
+
+            # race_idのレコードが存在するか確認
+            query = f"select * from {self.table.name} where race_id = '{race_id}';"
+            response = self.table.select_data(query=query)
+            if response:
+                print(f'Already exist {race_id} record')
+                continue
+
+            # race_htmlを保存するパスを設定
+            race_html_path = os.path.join(
+                settings.HTML_DIRECTORY, race_date, f'{race_id}.html'
             )
 
-
-def make_race_list_generator(date: str) -> Generator[str, None, None]:
-    race_list_url = urljoin(settings.RACE_DB_BASE_URL, f'race/list/{date}')
-    response = requests.get(race_list_url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    race_list = soup.select('#main > div > div > div > dl > dd > ul > li')
-    for race in race_list:
-        tmp_url = race.find('a').get('href')
-        url = urljoin(settings.RACE_DB_BASE_URL, tmp_url)
-        yield url
-
-
-class ScrapeDB(object):
-    def __init__(self, db_name: str, user_name: str,
-                 schema_name: str = None) -> None:
-        self.db_name = db_name
-        self.user_name = user_name
-        self.schema_name = schema_name
-
-    def begin_connection(self) -> psycopg2.extensions.connection:
-        if self.schema_name is not None:
-            connect = psycopg2.connect(
-                dbname=self.db_name,
-                user=self.user_name,
-                options=f'-c search_path={self.schema_name}'
+            # htmlを保存する
+            os.makedirs(
+                name=os.path.dirname(race_html_path), exist_ok=True
             )
+            urllib.request.urlretrieve(
+                url=race_url, filename=race_html_path
+            )
+
+            # race_id, race_html_pathからvaluesを作成
+            values = self._make_values(
+                race_id=race_id, html_path=race_html_path
+            )
+            print(f'values: {values}')
+
+            # valuesをrace_result_htmlsに格納
+            self.table.insert_data(values=values)
+            self.table.show_all_data()
+
+            # 1秒以上間隔を空ける。
+            if delay_time_s is None:
+                delay_time_s = 2
+            sleep(delay_time_s)
+
+
+class Robot(object):
+    def __init__(self, raw_url: str, user_agent: str = '*') -> None:
+        self.raw_url = raw_url
+        self.user_agent = user_agent
+        self.root_url = self._get_root_url(url=self.raw_url)
+        self.robot_txt_url = self._get_robot_txt_path(url=self.root_url)
+        self.rp = RobotFileParser()
+        self.rp.set_url(self.robot_txt_url)
+
+    def _get_root_url(self, url: str) -> None:
+        pattern = r'^https?://.*?\/'
+        result = re.match(pattern, url)
+        if result is not None:
+            return result.group()
         else:
-            connect = psycopg2.connect(
-                dbname=self.db_name,
-                user=self.user_name
-            )
-        return connect
+            return None
 
-    def insert_data_into_table(self, table_name: str, values: tuple):
-        with self.begin_connection() as connect:
-            with connect.cursor() as cursor:
-                try:
-                    query = f"insert into {table_name} values {values};"
-                    cursor.execute(query)
-                    cursor.execute('commit;')
-                except psycopg2.errors.UniqueViolation as error:
-                    print(error)
-                except Exception as error:
-                    print(error)
-                    cursor.execute('rollback;')
+    def _get_robot_txt_path(self, url: str) -> str:
+        if self.root_url is not None:
+            return f'{self.root_url}/robots.txt'
+        else:
+            return None
 
-    # def insert_data_into_table(self, table_name: str, values: tuple):
-    #     self.begin_connect()
-    #     cursor = self.connect.cursor()
-    #     cursor.execute('begin transaction;')
-    #     query = f"insert into {table_name} values {values};"
-    #     try:
-    #         cursor.execute(query)
-    #     except BaseException as e:
-    #         print(e)
-    #         # cursor.execute('rollback;')
-    #     # cursor.execute('update race_results set odds=10 where race_id=1;')
-    #     # cursor.execute(f"select * from {table_name};")
-    #     # print(cursor.fetchall())
-    #     # cursor.execute('commit;')
-    #     cursor.close()
-    #     self.end_connect(self.connect)
+    def check_can_fetch(self) -> bool:
+        if self.robot_txt_url is not None:
+            self.rp.read()
+            return self.rp.can_fetch(self.user_agent, self.robot_txt_url)
+        else:
+            print('Invalid url')
 
-
-class ScrapePipeline(object):
-    pass
+    def check_crawl_delay(self):
+        if self.robot_txt_url is not None:
+            self.rp.read()
+            return self.rp.crawl_delay(self.user_agent)
+        else:
+            print('Invalid url')
 
 
 def main():
-    target_date = '20211226'
-    race_list_generator = make_race_list_generator(date=target_date)
-    for race_index, race_url in enumerate(race_list_generator, start=1):
-        race_record = RaceResult(race_url=race_url)
-        race_record_generator = race_record.make_record_generator()
-        break
-    for record_dict in race_record_generator:
-        # print(f'dict: {record_dict}')
-        # dict -> tuple
-        record_tuple = tuple(record_dict.values())
-        # print(type(record_tuple))
-        print(f'tuple: {record_tuple}')
-        break
-    scrapedb = ScrapeDB(
-        db_name=settings.DB_NAME,
-        user_name=settings.USER_NAME,
-        schema_name=settings.SCHEMA_NAME)
-    scrapedb.insert_data_into_table(
-        table_name='race_results', values=record_tuple
+    url = 'https://db.netkeiba.com/'
+    robot = Robot(raw_url=url)
+    if not robot.check_can_fetch():
+        print('Disallow crawling')
+        return None
+    delay_time_s = robot.check_crawl_delay()
+
+    target_date = '20211227'
+    html_crawler = HTMLCrawl(
+        db_name=settings.DB_NAME, user_name=settings.USER_NAME,
+        schema_name=settings.SCRAPE_SCHEMA_NAME, table_name=settings.HTML_TABLE_NAME
     )
-    return None
+    html_crawler.run(
+        race_date=target_date, delay_time_s=delay_time_s
+    )
 
 
 if __name__ == '__main__':
