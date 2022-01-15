@@ -1,80 +1,142 @@
-import csv
-import json
-from typing import List
+import os
+import re
+import urllib
+from time import sleep
+from typing import List, Tuple
+from urllib.robotparser import RobotFileParser
 
-import lxml.html
 import requests
 from bs4 import BeautifulSoup
 
-URL = 'https://race.netkeiba.com/race/result.html?race_id=202106050811&rf=race_list'
-
-# response = requests.get(URL)
-# response.encoding = 'EUC-JP'
-# print(response.text)
+import settings
+from table import Table
 
 
-# tree = lxml.html.parse('./text.html')
-# html = tree.getroot()
-# html = lxml.html.fromstring(response.text)
+class HTMLCrawl(object):
+    def __init__(self, db_name: str, user_name: str, schema_name: str,
+                 table_name: str = settings.HTML_TABLE_NAME) -> None:
+        self.table = Table(
+            db_name=db_name, user_name=user_name, schema_name=schema_name, table_name=table_name
+        )
 
-# h1 = html.cssselect('h1')[0]
-# print(h1.tag)
-# print(h1.attrib)
-# print(h1.get('title'))
-# print(h1.text_content())
+    def _get_race_urls_list(self, race_date: str) -> List[str]:
+        race_list_url = urllib.parse.urljoin(
+            settings.RACE_DB_BASE_URL, f'race/list/{race_date}'
+        )
+        response = requests.get(race_list_url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        race_list = soup.select('#main > div > div > div > dl > dd > ul > li')
+        race_urls_list = []
+        for race in race_list:
+            relative_url = race.find('a').get('href')
+            absolute_url = urllib.parse.urljoin(
+                settings.RACE_DB_BASE_URL, relative_url)
+            race_urls_list.append(absolute_url)
+        return list(race_urls_list)
 
-def bs(url: str):
-    response = requests.get(url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    horse_name_list = soup.find_all('span', class_='Horse_Name')
-    for horse_name in horse_name_list:
-        h = horse_name.select('span > a')[0]
-        print(h.get('title'), h.get('href'))
-        print(horse_name.select('[]'))
+    def _make_values(self, race_id: str, html_path: str) -> Tuple[str, str]:
+        return str(race_id), str(html_path)
+
+    def run(self, race_date: str, delay_time_s: int = 2) -> None:
+        # race_dataからrace_urlのリストを取得
+        self.race_urls_list = self._get_race_urls_list(
+            race_date=race_date)
+        if not self.race_urls_list:
+            print(f'No race in {race_date}')
+        for race_url in self.race_urls_list:
+            # race_urlからrace_id, race_htmlを取得
+            race_id = str(race_url.split('/')[-2])
+
+            # race_idのレコードが存在するか確認
+            query = f"select * from {self.table.name} where race_id = '{race_id}';"
+            response = self.table.select_data(query=query)
+            if response:
+                print(f'Already exist {race_id} record')
+                continue
+
+            # race_htmlを保存するパスを設定
+            race_html_path = os.path.join(
+                settings.HTML_DIRECTORY, race_date, f'{race_id}.html'
+            )
+
+            # htmlを保存する
+            os.makedirs(
+                name=os.path.dirname(race_html_path), exist_ok=True
+            )
+            urllib.request.urlretrieve(
+                url=race_url, filename=race_html_path
+            )
+
+            # race_id, race_html_pathからvaluesを作成
+            values = self._make_values(
+                race_id=race_id, html_path=race_html_path
+            )
+            print(f'values: {values}')
+
+            # valuesをrace_result_htmlsに格納
+            self.table.insert_data(values=values)
+            self.table.show_all_data()
+
+            # 1秒以上間隔を空ける。
+            if delay_time_s is None:
+                delay_time_s = 2
+            sleep(delay_time_s)
 
 
-def fetch_html_from_url(url: str) -> str:
-    response = requests.get(url)
-    response.encoding = 'EUC-JP'
-    return response.text
+class Robot(object):
+    def __init__(self, raw_url: str, user_agent: str = '*') -> None:
+        self.raw_url = raw_url
+        self.user_agent = user_agent
+        self.root_url = self._get_root_url(url=self.raw_url)
+        self.robot_txt_url = self._get_robot_txt_path(url=self.root_url)
+        self.rp = RobotFileParser()
+        self.rp.set_url(self.robot_txt_url)
 
-
-def scrape(html: str, base_url: str) -> List[dict]:
-    books = []
-    html = lxml.html.fromstring(html)
-    html.make_links_absolute(base_url)
-
-    l = html.cssselect(
-        '#All_Result_Table > tbody > tr:nth-child(1)')
-    l = html.cssselect('a[href^="https://db.netkeiba.com/horse"]')
-    l = html.cssselect('.Horse_Name')
-    print(l)
-    print(type(l), len(l))
-    for a in l:
-        print(a.attrib)
-        url = a.cssselect('a[href^="https://"]')
-        url = a.get('href')
-        if url:
-            print(url)
+    def _get_root_url(self, url: str) -> None:
+        pattern = r'^https?://.*?\/'
+        result = re.match(pattern, url)
+        if result is not None:
+            return result.group()
         else:
-            print(url, 'ahh')
+            return None
 
-    # for a in html.cssselect(
-    #         '#All_Result_Table > tbody > tr:nth-child(1) > td:nth-child(4)'):
-    #     url = a.get('href')
-    # print(url)
-# All_Result_Table > tbody > tr:nth-child(1) > td:nth-child(4)
-# All_Result_Table > tbody > tr:nth-child(1) > td:nth-child(4) > span
+    def _get_robot_txt_path(self, url: str) -> str:
+        if self.root_url is not None:
+            return f'{self.root_url}/robots.txt'
+        else:
+            return None
 
+    def check_can_fetch(self) -> bool:
+        if self.robot_txt_url is not None:
+            self.rp.read()
+            return self.rp.can_fetch(self.user_agent, self.robot_txt_url)
+        else:
+            print('Invalid url')
 
-def save():
-    pass
+    def check_crawl_delay(self):
+        if self.robot_txt_url is not None:
+            self.rp.read()
+            return self.rp.crawl_delay(self.user_agent)
+        else:
+            print('Invalid url')
 
 
 def main():
-    bs(URL)
-    # html = fetch_html_from_url(url=URL)
-    # horses = scrape(html=html, base_url=URL)
+    url = 'https://db.netkeiba.com/'
+    robot = Robot(raw_url=url)
+    if not robot.check_can_fetch():
+        print('Disallow crawling')
+        return None
+    delay_time_s = robot.check_crawl_delay()
+
+    target_date = '20211227'
+    html_crawler = HTMLCrawl(
+        db_name=settings.DB_NAME, user_name=settings.USER_NAME,
+        schema_name=settings.SCRAPE_SCHEMA_NAME, table_name=settings.HTML_TABLE_NAME
+    )
+    html_crawler.run(
+        race_date=target_date, delay_time_s=delay_time_s
+    )
 
 
 if __name__ == '__main__':
