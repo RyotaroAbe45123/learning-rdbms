@@ -1,14 +1,53 @@
+from datetime import datetime, timedelta
 import os
 import re
 import urllib
 from time import sleep
-from typing import List, Tuple
+from typing import Generator, List, Tuple
 from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import BeautifulSoup
 from config import settings
 from lib import Table
+
+
+class Robot(object):
+    def __init__(self, raw_url: str, user_agent: str = '*') -> None:
+        self.raw_url = raw_url
+        self.user_agent = user_agent
+        self.root_url = self._get_root_url(url=self.raw_url)
+        self.robot_txt_url = self._get_robot_txt_path(url=self.root_url)
+        self.rp = RobotFileParser()
+        self.rp.set_url(self.robot_txt_url)
+
+    def _get_root_url(self, url: str) -> None:
+        pattern = r'^https?://.*?\/'
+        result = re.match(pattern, url)
+        if result is not None:
+            return result.group()
+        else:
+            return None
+
+    def _get_robot_txt_path(self, url: str) -> str:
+        if self.root_url is not None:
+            return f'{self.root_url}/robots.txt'
+        else:
+            return None
+
+    def check_can_fetch(self) -> bool:
+        if self.robot_txt_url is not None:
+            self.rp.read()
+            return self.rp.can_fetch(self.user_agent, self.robot_txt_url)
+        else:
+            print('Invalid url')
+
+    def check_crawl_delay(self):
+        if self.robot_txt_url is not None:
+            self.rp.read()
+            return self.rp.crawl_delay(self.user_agent)
+        else:
+            print('Invalid url')
 
 
 class HTMLCrawl(object):
@@ -83,42 +122,14 @@ class HTMLCrawl(object):
             sleep(delay_time_s)
 
 
-class Robot(object):
-    def __init__(self, raw_url: str, user_agent: str = '*') -> None:
-        self.raw_url = raw_url
-        self.user_agent = user_agent
-        self.root_url = self._get_root_url(url=self.raw_url)
-        self.robot_txt_url = self._get_robot_txt_path(url=self.root_url)
-        self.rp = RobotFileParser()
-        self.rp.set_url(self.robot_txt_url)
-
-    def _get_root_url(self, url: str) -> None:
-        pattern = r'^https?://.*?\/'
-        result = re.match(pattern, url)
-        if result is not None:
-            return result.group()
-        else:
-            return None
-
-    def _get_robot_txt_path(self, url: str) -> str:
-        if self.root_url is not None:
-            return f'{self.root_url}/robots.txt'
-        else:
-            return None
-
-    def check_can_fetch(self) -> bool:
-        if self.robot_txt_url is not None:
-            self.rp.read()
-            return self.rp.can_fetch(self.user_agent, self.robot_txt_url)
-        else:
-            print('Invalid url')
-
-    def check_crawl_delay(self):
-        if self.robot_txt_url is not None:
-            self.rp.read()
-            return self.rp.crawl_delay(self.user_agent)
-        else:
-            print('Invalid url')
+def make_target_date_generator(start_date: str, end_date: str) -> Generator[str, None, None]:
+    start = datetime.strptime(start_date, '%Y%m%d')
+    end = datetime.strptime(end_date, '%Y%m%d')
+    days = (end - start).days + 1
+    for i in range(days):
+        dst_date = start + timedelta(i)
+        dst_date = dst_date.strftime('%Y%m%d')
+        yield str(dst_date)
 
 
 def main():
@@ -129,14 +140,20 @@ def main():
         return None
     delay_time_s = robot.check_crawl_delay()
 
-    target_date = '20211226'
     html_crawler = HTMLCrawl(
         db_name=settings.DB_NAME, user_name=settings.USER_NAME, password=settings.PASSWORD,
         schema_name=settings.SCRAPE_SCHEMA_NAME, table_name=settings.HTML_TABLE_NAME
     )
-    html_crawler.run(
-        race_date=target_date, delay_time_s=delay_time_s
+
+    # do crawling
+    target_date_generator = make_target_date_generator(
+        start_date=settings.START_DATE, end_date=settings.END_DATE
     )
+    for target_date in target_date_generator:
+        print(target_date)
+        html_crawler.run(
+            race_date=target_date, delay_time_s=delay_time_s
+        )
 
 
 if __name__ == '__main__':
