@@ -7,16 +7,16 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import BeautifulSoup
-
-import settings
-from table import Table
+from config import settings
+from lib import Table
 
 
 class HTMLCrawl(object):
-    def __init__(self, db_name: str, user_name: str, schema_name: str,
+    def __init__(self, db_name: str, user_name: str, password: str, schema_name: str,
                  table_name: str = settings.HTML_TABLE_NAME) -> None:
         self.table = Table(
-            db_name=db_name, user_name=user_name, schema_name=schema_name, table_name=table_name
+            db_name=db_name, user_name=user_name, password=password,
+            schema_name=schema_name, table_name=table_name
         )
 
     def _get_race_urls_list(self, race_date: str) -> List[str]:
@@ -129,9 +129,9 @@ def main():
         return None
     delay_time_s = robot.check_crawl_delay()
 
-    target_date = '20211227'
+    target_date = '20211226'
     html_crawler = HTMLCrawl(
-        db_name=settings.DB_NAME, user_name=settings.USER_NAME,
+        db_name=settings.DB_NAME, user_name=settings.USER_NAME, password=settings.PASSWORD,
         schema_name=settings.SCRAPE_SCHEMA_NAME, table_name=settings.HTML_TABLE_NAME
     )
     html_crawler.run(
